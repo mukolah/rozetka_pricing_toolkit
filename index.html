@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rozetka - Purchase Manager</title>
+    <link rel="icon" href="static/favicon.ico">
+    <link rel="stylesheet" href="static/bootstrap.min.css">
+    <script src="static/jquery-3.6.0.min.js"></script>
+    <script src="static/socket.io.min.js"></script>
+    <style>
+        body.dark-mode {
+            background-color: #121212;
+            color: white;
+        }
+
+        .dark-mode .table {
+            color: white;
+        }
+
+        .dark-mode .table-row {
+            background-color: #222;
+            /* Darker background for rows in dark mode */
+            color: white;
+            /* Ensure text color is light for readability */
+        }
+
+        th {
+            cursor: pointer;
+        }
+
+        .table-row {
+            background-color: inherit;
+            color: inherit;
+            padding: 0.75rem;
+        }
+
+        .table-row td {
+            padding: 0.75rem;
+        }
+
+        .heatmap-cell {
+            padding: 10px;
+            text-align: center;
+        }
+
+        .heatmap-modal {
+            max-width: 90%;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container mt-4">
+        <h2 class="mb-3">Rozetka "Purchase Manager"</h2>
+        <div class="mb-3">
+            <input type="text" id="url-input" class="form-control"
+                placeholder="Enter filtered Rozetka URL with items to obtain the data and press Start">
+            <button id="start-btn" class="btn btn-primary mt-2">Start</button>
+            <button id="toggle-stock" class="btn btn-dark mt-2">Skip out of stock: Yes</button>
+            <!-- <button id="toggle-dark" class="btn btn-secondary mt-2">Toggle Dark Mode</button> Needs rework -->
+            <button id="regexp-link" class="btn btn-secondary mt-2">Regexp Builder</button>
+            <button id="custom-column-btn" class="btn btn-info mt-2">Custom Column</button>
+            <button id="heatmap-btn" class="btn btn-success mt-2">Build Heatmap</button>
+            <button id="export-csv-btn" class="btn btn-warning mt-2">Export as CSV</button>
+        </div>
+        <div class="mb-3">
+            <input type="text" id="heatmap-input" class="form-control"
+                placeholder="Heatmap: Enter main column and keywords (e.g., TB - Blue, Red Pro, Purple).  Columns don't have to exist, data comes from Product Name.">
+        </div>
+        <p id="status" class="text-info"></p>
+
+        <table class="table table-bordered table-hover mt-3">
+            <thead>
+                <tr id="table-head">
+                    <th onclick="sortTable(0)">Product Name</th>
+                    <th onclick="sortTable(1)">Price</th>
+                </tr>
+            </thead>
+            <tbody id="product-list"></tbody>
+        </table>
+    </div>
+
+    <!-- Heatmap Modal -->
+    <div class="modal fade" id="heatmapModal" tabindex="-1" aria-labelledby="heatmapModalLabel" aria-hidden="true">
+        <div class="modal-dialog heatmap-modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="heatmapModalLabel">Price Heatmap</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div id="heatmap-container"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let products = [];
+        let sortDirections = {};
+
+        $('#start-btn').click(() => {
+            const url = $('#url-input').val();
+            socket.emit('start_scraping', { url });
+            $('#status').text('Scraping started...');
+        });
+
+        socket.on('update', (data) => {
+            products.push(...data.products);
+            updateTable();
+        });
+
+        socket.on('status', (data) => {
+            $('#status').text(data.message);
+        });
+
+        $('#toggle-dark').click(() => {
+            $('body').toggleClass('dark-mode');
+        });
+
+        $('#heatmap-btn').click(() => {
+            const input = $('#heatmap-input').val().trim();
+            if (!input) {
+                alert("Enter first column and comma separated keywords (e.g., TB - Blue, Red Pro, Purple) in Heatmap field.");
+                return;
+            }
+
+            const [column, keywords] = input.split(' - ');
+            if (!column || !keywords) {
+                alert("Invalid input format. Use: Column - Keyword1, Keyword2, ...");
+                return;
+            }
+
+            const keywordList = keywords.split(',').map(k => k.trim());
+            buildHeatmap(column, keywordList);
+            $('#heatmapModal').modal('show');
+        });
+
+        function updateTable() {
+            $('#product-list').empty();
+            products.forEach(product => {
+                $('#product-list').append(`
+            <tr class="table-row ${$('body').hasClass('dark-mode') ? 'dark-mode' : ''}">
+                <td><a href="${product.link}" target="_blank">${product.name}</a></td>
+                <td>${product.price}</td>
+            </tr>
+        `);
+            });
+        }
+
+        function buildHeatmap(column, keywords) {
+            const heatmapData = {};
+
+            // Extract sizes from the specified column
+            products.forEach(product => {
+                const match = product.name.match(new RegExp(`(\\d+)\\s*${column}`, 'i'));
+                if (match) {
+                    const size = match[1];
+                    if (!heatmapData[size]) heatmapData[size] = {};
+
+                    // Check for each keyword
+                    keywords.forEach(keyword => {
+                        if (product.name.includes(keyword)) {
+                            const price = parseFloat(product.price.replace(/[^\d.]/g, '')) || 0;
+                            heatmapData[size][keyword] = price;
+                        }
+                    });
+                }
+            });
+
+            const sizes = Object.keys(heatmapData).sort((a, b) => a - b);
+
+            // Find min and max prices for color scale
+            let minPrice = Infinity;
+            let maxPrice = -Infinity;
+            sizes.forEach(size => {
+                keywords.forEach(keyword => {
+                    const price = heatmapData[size][keyword];
+                    if (price !== undefined) {
+                        minPrice = Math.min(minPrice, price);
+                        maxPrice = Math.max(maxPrice, price);
+                    }
+                });
+            });
+
+            function getColor(price) {
+                const ratio = (price - minPrice) / (maxPrice - minPrice);
+                const r = Math.floor(255 * ratio);
+                const g = Math.floor(255 * (1 - ratio));
+                return `rgb(${r},${g},0)`;
+            }
+
+            let heatmapHtml = '<table class="table table-bordered">';
+            heatmapHtml += '<thead><tr><th>' + column + '</th>';
+            keywords.forEach(keyword => heatmapHtml += `<th>${keyword}</th>`);
+            heatmapHtml += '</tr></thead><tbody>';
+
+            sizes.forEach(size => {
+                heatmapHtml += `<tr><td>${size}</td>`;
+                keywords.forEach(keyword => {
+                    const price = heatmapData[size][keyword] || 'n/a';
+                    const color = price !== 'n/a' ? getColor(price) : 'white';
+                    heatmapHtml += `<td class="heatmap-cell" style="background-color: ${color}">${price}</td>`;
+                });
+                heatmapHtml += '</tr>';
+            });
+
+            heatmapHtml += '</tbody></table>';
+            $('#heatmap-container').html(heatmapHtml);
+        }
+
+
+        $('#custom-column-btn').click(() => {
+            const pattern = prompt("Enter wildcard pattern (e.g., *TB) or complex regexp for better results (e.g. \\b(\\d+|\\d+\\s)TB\\b):");
+            if (!pattern) return;
+
+            $.ajax({
+                url: '/filter',
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({ pattern, products: products.map(p => p.name) }),
+                success: (response) => {
+                    if (Object.keys(response.filtered_results).length === 0) {
+                        alert("No matches found.");
+                        return;
+                    }
+
+                    const columnId = `column-${pattern.replace(/\W/g, '')}`;
+                    if ($(`#${columnId}`).length > 0) return;
+
+                    let columnIndex = document.querySelectorAll('th').length;
+                    $('#table-head').append(`<th onclick="sortTable(${columnIndex})">${pattern}</th>`);
+
+                    // Update the products array with custom column data
+                    products.forEach((product, index) => {
+                        const productName = product.name;
+                        const match = response.filtered_results[productName] || "";
+                        product[pattern] = match; // Add custom column data to the product object
+                    });
+
+                    // Update the table with custom column data
+                    $('#product-list tr').each((index, row) => {
+                        const productName = $(row).find('td:first-child').text();
+                        let match = response.filtered_results[productName] || "";
+                        $(row).append(`<td>${match}</td>`);
+                    });
+                }
+            });
+        });
+
+        function sortTable(columnIndex) {
+            const table = document.querySelector('table');
+            let rows = Array.from(table.rows).slice(1);
+
+            if (!(columnIndex in sortDirections)) {
+                sortDirections[columnIndex] = 1; // Default: Ascending
+            } else {
+                sortDirections[columnIndex] *= -1; // Toggle direction
+            }
+
+            rows.sort((rowA, rowB) => {
+                let valA = rowA.cells[columnIndex].innerText.trim();
+                let valB = rowB.cells[columnIndex].innerText.trim();
+
+                // Sort numerically if column contains prices
+                if (columnIndex === 1 || valA.match(/^\d[\d\s]*₴/)) {
+                    valA = parseFloat(valA.replace(/\s|₴/g, '')) || 0;
+                    valB = parseFloat(valB.replace(/\s|₴/g, '')) || 0;
+                }
+
+                return (valA > valB ? 1 : -1) * sortDirections[columnIndex];
+            });
+
+            rows.forEach(row => {
+                table.appendChild(row);
+                row.classList.add('table-row');
+            });
+        }
+
+        $('#export-csv-btn').click(() => {
+            $.ajax({
+                url: '/export_csv',
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({ products }),
+                success: (response) => {
+                    const blob = new Blob([response], { type: 'text/csv' });
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.setAttribute('href', url);
+                    a.setAttribute('download', 'products.csv');
+                    a.click();
+                },
+                error: (error) => {
+                    alert('Failed to export data as CSV.');
+                    console.error('Export error:', error);
+                }
+            });
+        });
+        document.getElementById('regexp-link').addEventListener('click', function () {
+            window.open('https://regex-generator.olafneumann.org/', '_blank');
+        });
+        let skipOutStock = true; // Track the current state
+
+        $('#toggle-stock').click(() => {
+            skipOutStock = !skipOutStock; // Toggle the boolean
+            const buttonText = skipOutStock ? 'Skip out of stock: Yes' : 'Skip out of stock: No';
+            $('#toggle-stock').text(buttonText); // Update button text
+
+            socket.emit('toggle_skip_stock', { skipOutStock });
+        });
+
+    </script>
+    <script src="static/bootstrap.bundle.min.js"></script>
+</body>
+
+</html>
